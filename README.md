@@ -314,3 +314,129 @@ npx @modelcontextprotocol/inspector python -m mattermost_mcp.server
 4. 사내 사설 CA 인증서 사용 여부
 
 그리고 Phase 1부터 차근차근 진행해주세요.
+
+---
+
+# 설치 및 실행 (구현 완료 후 사용 가이드)
+
+## 1. Python 버전 권장
+
+**Python 3.12 또는 3.13** 사용을 권장합니다. `mattermostdriver`(7.3.2)와 그 의존성 `aiohttp` 휠이 Python 3.14에서는 아직 안정적이지 않을 수 있습니다.
+
+```bash
+python3.12 --version  # 또는 python3.13
+```
+
+macOS에서는 `brew install python@3.12` 또는 `pyenv install 3.12` 로 설치할 수 있습니다.
+
+## 2. 의존성 설치
+
+```bash
+git clone <repo>
+cd mattermost-mcp
+python3.12 -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+```
+
+## 3. 환경 변수 설정
+
+`.env.example` 을 복사해서 `.env` 를 만들고 값을 채웁니다.
+
+```bash
+cp .env.example .env
+# editor로 .env 열어서 MM_URL, MM_TOKEN을 채움
+```
+
+| 변수 | 기본 | 설명 |
+| --- | --- | --- |
+| `MM_URL` | (필수) | 호스트만, 예: `mattermost.mycompany.com` |
+| `MM_TOKEN` | (필수) | Personal Access Token |
+| `MM_SCHEME` | `https` | |
+| `MM_PORT` | `443` | |
+| `MM_VERIFY_SSL` | `true` | `false`는 로컬 dev 한정 |
+| `MM_CA_BUNDLE` | _(unset)_ | 사내 사설 CA 인증서 경로 (권장) |
+| `MM_BLOCKED_CHANNELS` | _(unset)_ | 콤마 구분 채널명 — MCP가 조회 거부 |
+| `MM_AUDIT_LOG_PATH` | `~/.mattermost-mcp/audit.log` | 감사 로그 위치 |
+
+## 4. 동작 검증
+
+### 4-1. 인증/로그인 검증
+```bash
+python -c "from mattermost_mcp.client import MattermostClient; \
+           from mattermost_mcp.auth import EnvTokenAuth; \
+           c = MattermostClient(EnvTokenAuth()); c.login(); print(c.my_username)"
+```
+본인 username이 출력되면 성공.
+
+### 4-2. MCP Inspector로 도구 노출 확인
+```bash
+npx @modelcontextprotocol/inspector python -m mattermost_mcp.server
+```
+
+### 4-3. 테스트
+```bash
+pytest tests/
+```
+
+## 5. Claude Desktop 연결
+
+`claude_desktop_config.json` (macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`)에 다음 블록을 추가합니다.
+
+> **중요**: Claude Desktop은 작업 디렉토리를 보장하지 않으므로 `.env`보다 config의 `"env"` 블록에 환경 변수를 직접 넣는 것이 안전합니다.
+
+```json
+{
+  "mcpServers": {
+    "mattermost": {
+      "command": "/absolute/path/to/mattermost-mcp/.venv/bin/python",
+      "args": ["-m", "mattermost_mcp.server"],
+      "env": {
+        "MM_URL": "mattermost.mycompany.com",
+        "MM_TOKEN": "your-personal-access-token",
+        "MM_SCHEME": "https",
+        "MM_PORT": "443",
+        "MM_VERIFY_SSL": "true",
+        "MM_CA_BUNDLE": "/etc/ssl/certs/company-ca.pem",
+        "MM_BLOCKED_CHANNELS": "hr-private,exec-only"
+      }
+    }
+  }
+}
+```
+
+Claude Desktop을 재시작한 후 자연어로 테스트:
+- "내 미읽음 채널 보여줘" → `get_unread_summary`
+- "engineering 채널 최근 메시지 알려줘" → `list_my_channels` + `get_channel_messages`
+- "박과장님께 '회의 잘 마쳤습니다' DM 보내줘" → `send_dm_by_username` (confirm 흐름)
+
+## 6. 트러블슈팅
+
+| 증상 | 원인 / 해결 |
+| --- | --- |
+| `MM_URL is not set` | Claude Desktop config의 `env` 블록 또는 `.env` 누락 |
+| `unauthorized` | PAT 만료/오타. Mattermost 프로필에서 재발급 |
+| `SSL: CERTIFICATE_VERIFY_FAILED` | 사내 사설 CA. `MM_CA_BUNDLE` 경로 지정 |
+| `aiohttp` 설치 실패 | Python 3.14 사용 중 → 3.12/3.13으로 다운그레이드 |
+| 도구는 보이지만 호출 시 응답 없음 | `~/.mattermost-mcp/audit.log` 와 Claude Desktop 로그 확인 |
+
+## 7. 구현된 도구 목록
+
+**읽기:** `whoami`, `list_my_channels`, `get_unread_summary`, `get_channel_messages`, `get_thread`, `find_user`, `get_user_info`, `search_messages`, `open_dm`
+
+**쓰기 (모두 `confirm=True` 필수):** `send_message`, `send_dm_by_username`, `edit_message`, `delete_message`, `join_channel`, `leave_channel`, `add_reaction`, `remove_reaction`
+
+**합성 워크플로우:** `summarize_unread`, `get_my_mentions`, `find_message_by_description`
+
+## 8. 보안 요약
+
+- 모든 쓰기 도구는 `confirm=False` 기본값으로 시작 → LLM이 사용자에게 미리보기 후 재호출
+- 쓰기 작업은 `~/.mattermost-mcp/audit.log` 에 JSON Lines로 기록 (토큰 필드 자동 제거)
+- 다른 사용자 메시지 본문은 `external_user_input` 봉투로 격리 (prompt injection 방어)
+- SSL 검증 기본 ON. `MM_VERIFY_SSL=false`는 명시적 opt-in only
+- `MM_BLOCKED_CHANNELS`로 민감 채널 차단
+
+## 9. 향후 확장 포인트
+
+- **HTTP transport + OAuth**: `auth.py`의 `AuthProvider` ABC를 새 구현(`OAuthProvider`)으로 교체. `server.py`에서 `mcp.run(transport="streamable-http")` 같은 형태로 전환.
+- **mattermostdriver 동기 호출 → httpx async**: 현재 sync driver를 async tool에서 호출 중. 다중 클라이언트 환경에서는 `httpx.AsyncClient` 기반 직접 구현으로 이관 권장.
